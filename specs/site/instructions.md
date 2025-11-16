@@ -226,4 +226,4 @@ based on @w3/extracted/system-prompts.json and @w3/extracted/tool-definitions.js
 
 ## claude code hooks 文档
 
-查阅官方文档和网上资料，帮我撰写一篇 claude code hooks 的深度分析和使用介绍的 mdx 文档，注意使用 ./site 的 design token，放在 @site/src/pages/materials/ 下。
+查阅官方文档和网上资料，帮我各撰写一篇 claude code hooks/skills 的深度分析和使用介绍的 mdx 文档，注意使用 ./site 的 design token，放在 @site/src/pages/materials/ 下。

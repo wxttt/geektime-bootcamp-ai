@@ -5,7 +5,6 @@ description: 深度解析 Claude Code Hooks 机制 - 从基础到高级的自动
 category: 工具深度解析
 ---
 
-import MetricCard from '../../components/materials/MetricCard';
 import Mermaid from '../../components/materials/Mermaid';
 import ScrollReveal from '../../components/ui/ScrollReveal';
 import ExampleCode from '../../components/materials/ExampleCode';
@@ -15,21 +14,6 @@ import ExampleCode from '../../components/materials/ExampleCode';
 **掌握 Claude Code 自动化工作流的核心机制**
 
 > **核心机制**: 事件驱动的自动化响应 | **配置方式**: JSON + Shell 命令 | **应用场景**: 代码质量、安全防护、工作流自动化
-
----
-
-## 📊 Claude Code Hooks 核心数据
-
-export const hooksMetrics = [
-  { label: 'Hook 事件类型', value: 9, color: '#b3272c', icon: '🎯' },
-  { label: 'Hook 类型', value: 2, color: '#772d8b', icon: '⚙️' },
-  { label: '配置层级', value: 3, color: '#77a0a9', icon: '📁' },
-  { label: '通信方式', value: 2, color: '#d3f9b5', icon: '🔌' },
-  { label: '安全检查项', value: 6, color: '#f5cbc5', icon: '🛡️' },
-  { label: '最佳实践条数', value: 12, color: '#772d8b', icon: '✅' }
-]
-
-<MetricCard title="Claude Code Hooks 数据概览" items={hooksMetrics} type="number" client:load />
 
 ---
 
