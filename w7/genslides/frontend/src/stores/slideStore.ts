@@ -52,6 +52,10 @@ interface SlideState {
   setStylePrompt: (prompt: string) => void;
   clearStyleCandidates: () => void;
 
+  // Actions - Export
+  exportProject: () => Promise<void>;
+  isExporting: boolean;
+
   // Actions - Error
   clearError: () => void;
 }
@@ -74,6 +78,7 @@ export const useSlideStore = create<SlideState>()(
       generatingSlideId: null,
       isGeneratingStyle: false,
       isSaving: false,
+      isExporting: false,
       error: null,
 
       // Project actions
@@ -367,6 +372,19 @@ export const useSlideStore = create<SlideState>()(
 
       clearStyleCandidates: () => {
         set({ styleCandidates: [], stylePrompt: '' });
+      },
+
+      exportProject: async () => {
+        const { slug } = get();
+        if (!slug) return;
+
+        set({ isExporting: true, error: null });
+        try {
+          await slidesApi.exportProject(slug);
+          set({ isExporting: false });
+        } catch (e) {
+          set({ error: (e as Error).message, isExporting: false });
+        }
       },
 
       clearError: () => {

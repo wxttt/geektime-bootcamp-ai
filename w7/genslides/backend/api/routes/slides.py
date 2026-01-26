@@ -1,6 +1,7 @@
 """Slides API routes."""
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import Response
 
 from api.dependencies import get_slide_service
 from api.schemas.slide import (
@@ -74,6 +75,39 @@ async def get_project(
             style=style_info,
             slides=slides,
             total_cost=project.total_cost,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+@router.get("/{slug}/export")
+async def export_project(
+    slug: str, service: SlideService = Depends(get_slide_service)
+):
+    """
+    Export all slide images as a ZIP file.
+
+    Each slide's best image (default > hash match > latest) is exported
+    with sequential naming: 00.jpg, 01.jpg, etc.
+
+    Args:
+        slug: Project identifier
+        service: Slide service instance
+
+    Returns:
+        ZIP file containing all slide images
+
+    Raises:
+        HTTPException: 404 if project not found or has no images
+    """
+    try:
+        zip_bytes, filename = service.export_project(slug)
+        return Response(
+            content=zip_bytes,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            },
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))

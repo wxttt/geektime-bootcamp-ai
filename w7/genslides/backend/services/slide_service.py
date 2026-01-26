@@ -1,6 +1,9 @@
 """Slide business logic service."""
 
+import io
+import zipfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 from models.slide import Slide
 from repositories.image_repository import ImageRepository
@@ -233,3 +236,85 @@ class SlideService:
                 return filename
 
         raise ValueError(f"Slide '{sid}' not found in project '{slug}'")
+
+    def export_project(self, slug: str) -> tuple[bytes, str]:
+        """
+        Export all slide images as a ZIP file.
+
+        For each slide, selects the best available image with priority:
+        1. default_image (user-selected)
+        2. Image matching current content hash
+        3. Most recent image
+
+        Args:
+            slug: Project identifier
+
+        Returns:
+            Tuple of (zip_bytes, filename) where filename is "{title}.zip"
+
+        Raises:
+            ValueError: If project not found or no images to export
+        """
+        project = self.get_project(slug)
+
+        if not project.slides:
+            raise ValueError(f"Project '{slug}' has no slides to export")
+
+        zip_buffer = io.BytesIO()
+        exported_count = 0
+
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for index, slide in enumerate(project.slides):
+                image_path = self._get_best_image_path(slug, slide)
+
+                if image_path and image_path.exists():
+                    # Name files as 00.jpg, 01.jpg, etc.
+                    archive_name = f"{index:02d}.jpg"
+                    zf.write(image_path, archive_name)
+                    exported_count += 1
+
+        if exported_count == 0:
+            raise ValueError(f"Project '{slug}' has no images to export")
+
+        zip_buffer.seek(0)
+        safe_title = "".join(c for c in project.title if c.isalnum() or c in " -_").strip()
+        filename = f"{safe_title or slug}.zip"
+
+        return zip_buffer.getvalue(), filename
+
+    def _get_best_image_path(self, slug: str, slide: Slide) -> Path | None:
+        """
+        Get the best image path for a slide.
+
+        Priority: default_image > hash match > most recent
+
+        Args:
+            slug: Project identifier
+            slide: Slide object
+
+        Returns:
+            Path to the best image, or None if no images exist
+        """
+        images = self.image_repo.list_images(slug, slide.sid)
+        if not images:
+            return None
+
+        # Priority 1: User-selected default image
+        if slide.default_image:
+            content_hash = slide.default_image.rsplit(".", 1)[0]
+            path = self.image_repo.get_image_path(slug, slide.sid, content_hash)
+            if path:
+                return path
+
+        # Priority 2: Image matching current content hash
+        for img in images:
+            if img.content_hash == slide.content_hash:
+                return self.image_repo.get_image_path(
+                    slug, slide.sid, img.content_hash
+                )
+
+        # Priority 3: Most recent image (images are sorted by mtime, last is newest)
+        if images:
+            return self.image_repo.get_image_path(
+                slug, slide.sid, images[-1].content_hash
+            )
