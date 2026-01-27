@@ -106,11 +106,22 @@ class NaturalLanguageInput(BaseModel):
     prompt: str = Field(..., min_length=5, max_length=500)
 
 
+class QueryIntent(BaseModel):
+    """Intent analysis result from AI."""
+
+    execute: bool = Field(default=False, description="Whether to execute the query")
+    export: bool = Field(default=False, description="Whether to export the results")
+    export_format: Literal["csv", "json"] | None = Field(
+        default=None, alias="exportFormat", description="Export format if export is true"
+    )
+
+
 class GeneratedSqlResponse(BaseModel):
-    """Response schema for generated SQL."""
+    """Response schema for generated SQL with intent."""
 
     sql: str
     explanation: str
+    intent: QueryIntent
 
 
 # Error Schema

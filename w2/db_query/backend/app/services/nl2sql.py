@@ -1,25 +1,31 @@
-"""Natural Language to SQL conversion service using OpenAI."""
+"""Natural Language to SQL conversion service with AI intent recognition."""
+
+import json
+import logging
 
 from openai import AsyncOpenAI
+
 from app.config import settings
 from app.models.database import DatabaseType
-import logging
 
 logger = logging.getLogger(__name__)
 
 
 class NaturalLanguageToSQLService:
-    """Service for converting natural language queries to SQL using OpenAI."""
+    """Service for converting natural language queries to SQL with intent recognition."""
 
     def __init__(self):
-        """Initialize OpenAI client."""
-        self.client = AsyncOpenAI(api_key=settings.openai_api_key)
-        self.model = "gpt-4o-mini"  # Cost-effective model for SQL generation
+        """Initialize OpenAI client with optional custom base URL."""
+        client_kwargs = {"api_key": settings.openai_api_key}
+        if settings.openai_base_url:
+            client_kwargs["base_url"] = settings.openai_base_url
+        self.client = AsyncOpenAI(**client_kwargs)
+        self.model = settings.openai_model
 
     def _build_prompt(
         self, user_prompt: str, metadata: dict, db_type: DatabaseType = DatabaseType.POSTGRESQL
     ) -> list[dict[str, str]]:
-        """Build the prompt for OpenAI with database metadata context.
+        """Build the prompt for OpenAI with intent recognition.
 
         Args:
             user_prompt: Natural language query from user
@@ -49,7 +55,9 @@ class NaturalLanguageToSQLService:
             schema_context.append(table_info)
 
         for view in metadata.get("views", []):
-            columns_info = [f"  - {col['name']} ({col['dataType']})" for col in view.get("columns", [])]
+            columns_info = [
+                f"  - {col['name']} ({col['dataType']})" for col in view.get("columns", [])
+            ]
             view_info = f"View: {view['schemaName']}.{view['name']}\n"
             view_info += "\n".join(columns_info)
             schema_context.append(view_info)
@@ -59,30 +67,45 @@ class NaturalLanguageToSQLService:
         # Build database-specific rules
         if db_type == DatabaseType.MYSQL:
             db_name = "MySQL"
-            syntax_rules = """3. Use backticks for identifiers (e.g., `table_name`, `column_name`)
-4. Return valid MySQL syntax
-5. Use MySQL LIMIT syntax (LIMIT n)
-6. Be aware of MySQL-specific features like AUTO_INCREMENT"""
+            syntax_rules = """- Use backticks for identifiers (e.g., `table_name`)
+- Use MySQL LIMIT syntax"""
         else:
             db_name = "PostgreSQL"
-            syntax_rules = """3. Use proper schema qualification (schema.table)
-4. Return valid PostgreSQL syntax
-5. Use double quotes for identifiers if needed"""
+            syntax_rules = """- Use proper schema qualification (schema.table)
+- Use double quotes for identifiers if needed"""
 
-        system_message = f"""You are an expert SQL query generator for {db_name} databases.
+        system_message = f"""You are an expert SQL query generator and user intent analyzer for {db_name}.
 
 Database Schema:
 {schema_text}
 
-Rules:
-1. Generate ONLY SELECT queries (no INSERT/UPDATE/DELETE/DROP)
-2. Always include LIMIT clause (max 1000 rows)
-{syntax_rules}
-7. Handle both English and Chinese natural language
-8. Be concise - return just the SQL query
+Your tasks:
+1. Generate a valid SELECT SQL query based on the user's natural language request
+2. Analyze the user's intent regarding query execution and export
 
-Output format:
-Return ONLY the SQL query, nothing else. No explanations, no markdown, just the SQL."""
+SQL Rules:
+- Generate ONLY SELECT queries (no INSERT/UPDATE/DELETE/DROP)
+- Always include LIMIT clause (max 1000 rows)
+{syntax_rules}
+- Handle both English and Chinese natural language
+
+Intent Analysis Rules:
+- execute: Set to true if user wants to see/view/run results immediately
+  Keywords indicating execute: 执行, 运行, 查一下, 跑一下, 看看, 显示, 查询一下, show, run, execute, get, fetch, display, view, find
+- export: Set to true if user wants to download/save/export the data to a file
+  Keywords indicating export: 导出, 下载, 保存, 输出, 生成文件, export, download, save, output, to file, 保存为
+- exportFormat:
+  - "csv" if user mentions: csv, CSV, 表格, excel, spreadsheet, 电子表格
+  - "json" if user mentions: json, JSON
+  - "csv" as default if export is true but no format specified
+  - null if export is false
+
+IMPORTANT:
+- If user only asks a descriptive question without action words, set execute=false and export=false
+- If user wants to export, execute must also be true (can't export without executing)
+
+Output format: Return ONLY valid JSON (no markdown code blocks):
+{{"sql": "SELECT ...", "explanation": "Brief description in same language as user input", "intent": {{"execute": true/false, "export": true/false, "exportFormat": "csv" | "json" | null}}}}"""
 
         return [
             {"role": "system", "content": system_message},
@@ -91,8 +114,8 @@ Return ONLY the SQL query, nothing else. No explanations, no markdown, just the 
 
     async def generate_sql(
         self, user_prompt: str, metadata: dict, db_type: DatabaseType = DatabaseType.POSTGRESQL
-    ) -> dict[str, str]:
-        """Convert natural language to SQL query.
+    ) -> dict:
+        """Convert natural language to SQL with intent recognition.
 
         Args:
             user_prompt: Natural language query
@@ -100,7 +123,7 @@ Return ONLY the SQL query, nothing else. No explanations, no markdown, just the 
             db_type: Database type (PostgreSQL or MySQL)
 
         Returns:
-            Dict with 'sql' and 'explanation' keys
+            Dict with 'sql', 'explanation', and 'intent' keys
 
         Raises:
             Exception: If OpenAI API call fails
@@ -112,24 +135,49 @@ Return ONLY the SQL query, nothing else. No explanations, no markdown, just the 
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                temperature=0.1,  # Low temperature for consistent SQL generation
-                max_tokens=500,
+                temperature=0.1,
+                max_tokens=800,
             )
 
-            generated_sql = response.choices[0].message.content.strip()
+            content = response.choices[0].message.content.strip()
 
-            # Clean up the response (remove markdown code blocks if present)
-            if generated_sql.startswith("```sql"):
-                generated_sql = generated_sql.replace("```sql", "").replace("```", "").strip()
-            elif generated_sql.startswith("```"):
-                generated_sql = generated_sql.replace("```", "").strip()
+            # Clean up markdown if present
+            if content.startswith("```json"):
+                content = content.replace("```json", "").replace("```", "").strip()
+            elif content.startswith("```"):
+                content = content.replace("```", "").strip()
 
-            # Generate explanation
-            explanation = f"Generated SQL from: {user_prompt}"
+            # Parse JSON response
+            try:
+                result = json.loads(content)
+            except json.JSONDecodeError:
+                # Fallback: try to extract SQL from non-JSON response
+                logger.warning(f"Failed to parse AI response as JSON, using fallback: {content[:100]}")
+                result = {
+                    "sql": content,
+                    "explanation": f"Generated from: {user_prompt}",
+                    "intent": {"execute": False, "export": False, "exportFormat": None},
+                }
 
-            logger.info(f"Generated SQL for prompt: {user_prompt[:50]}...")
+            # Ensure intent structure exists with defaults
+            if "intent" not in result:
+                result["intent"] = {"execute": False, "export": False, "exportFormat": None}
+            else:
+                # Ensure all intent fields exist
+                result["intent"].setdefault("execute", False)
+                result["intent"].setdefault("export", False)
+                result["intent"].setdefault("exportFormat", None)
 
-            return {"sql": generated_sql, "explanation": explanation}
+            # If export is true, execute must also be true
+            if result["intent"]["export"]:
+                result["intent"]["execute"] = True
+
+            logger.info(
+                f"Generated SQL with intent: execute={result['intent']['execute']}, "
+                f"export={result['intent']['export']}, format={result['intent']['exportFormat']}"
+            )
+
+            return result
 
         except Exception as e:
             logger.error(f"Failed to generate SQL: {str(e)}")

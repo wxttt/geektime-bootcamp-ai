@@ -1,20 +1,20 @@
-/** Natural language query input component. */
+/** Natural language query input component with smart intent recognition. */
 
 import React, { useState } from "react";
 import { Input, Button, Space, Typography, Alert } from "antd";
-import { SendOutlined, LoadingOutlined } from "@ant-design/icons";
+import { ThunderboltOutlined, LoadingOutlined } from "@ant-design/icons";
 
 const { TextArea } = Input;
 const { Text } = Typography;
 
 interface NaturalLanguageInputProps {
-  onGenerateSQL: (prompt: string) => void;
+  onSmartQuery: (prompt: string) => void;
   loading?: boolean;
   error?: string | null;
 }
 
 export const NaturalLanguageInput: React.FC<NaturalLanguageInputProps> = ({
-  onGenerateSQL,
+  onSmartQuery,
   loading = false,
   error = null,
 }) => {
@@ -22,13 +22,14 @@ export const NaturalLanguageInput: React.FC<NaturalLanguageInputProps> = ({
 
   const handleSubmit = () => {
     if (prompt.trim()) {
-      onGenerateSQL(prompt.trim());
+      onSmartQuery(prompt.trim());
     }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // Submit on Cmd/Ctrl + Enter
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
       handleSubmit();
     }
   };
@@ -48,11 +49,15 @@ export const NaturalLanguageInput: React.FC<NaturalLanguageInputProps> = ({
         value={prompt}
         onChange={(e) => setPrompt(e.target.value)}
         onKeyDown={handleKeyDown}
-        placeholder="例如：查询所有未完成的任务
-或：Show me all active users from the last 30 days"
-        rows={4}
+        placeholder={`Examples:
+• "查询所有部门" - Generate SQL only
+• "看看有多少候选人" - Generate and execute
+• "导出所有职位信息为CSV" - Generate, execute, and export
+
+AI will automatically detect your intent.`}
+        rows={5}
         style={{
-          fontSize: 15,
+          fontSize: 14,
           borderWidth: 2,
           borderRadius: 2,
         }}
@@ -61,7 +66,7 @@ export const NaturalLanguageInput: React.FC<NaturalLanguageInputProps> = ({
 
       {error && (
         <Alert
-          message="Generation Failed"
+          message="Query Failed"
           description={error}
           type="error"
           closable
@@ -71,11 +76,11 @@ export const NaturalLanguageInput: React.FC<NaturalLanguageInputProps> = ({
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Press Cmd/Ctrl + Enter to generate
+          Press Cmd/Ctrl + Enter to submit
         </Text>
         <Button
           type="primary"
-          icon={loading ? <LoadingOutlined /> : <SendOutlined />}
+          icon={loading ? <LoadingOutlined /> : <ThunderboltOutlined />}
           onClick={handleSubmit}
           loading={loading}
           disabled={!prompt.trim() || loading}
@@ -87,7 +92,7 @@ export const NaturalLanguageInput: React.FC<NaturalLanguageInputProps> = ({
             fontWeight: 700,
           }}
         >
-          GENERATE SQL
+          SMART QUERY
         </Button>
       </div>
     </Space>

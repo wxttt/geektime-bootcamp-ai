@@ -28,3 +28,17 @@ export interface QueryHistoryEntry {
   errorMessage?: string | null;
   querySource: "manual" | "natural_language";
 }
+
+/** AI intent recognition result. */
+export interface QueryIntent {
+  execute: boolean;
+  export: boolean;
+  exportFormat: "csv" | "json" | null;
+}
+
+/** Natural language query response with AI intent. */
+export interface NaturalQueryResponse {
+  sql: string;
+  explanation: string;
+  intent: QueryIntent;
+}

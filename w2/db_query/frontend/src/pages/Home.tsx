@@ -1,6 +1,6 @@
 /** Main page with integrated database management and query interface. */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   Card,
   Spin,
@@ -15,6 +15,8 @@ import {
   Empty,
   Tabs,
   Modal,
+  Dropdown,
+  Alert,
 } from "antd";
 import {
   PlayCircleOutlined,
@@ -22,23 +24,17 @@ import {
   DatabaseOutlined,
   ReloadOutlined,
   ExclamationCircleOutlined,
+  DownloadOutlined,
 } from "@ant-design/icons";
 import { apiClient } from "../services/api";
 import { DatabaseMetadata, TableMetadata } from "../types/metadata";
+import { QueryResult, NaturalQueryResponse } from "../types/query";
 import { MetadataTree } from "../components/MetadataTree";
 import { SqlEditor } from "../components/SqlEditor";
 import { DatabaseSidebar } from "../components/DatabaseSidebar";
 import { NaturalLanguageInput } from "../components/NaturalLanguageInput";
 
 const { Title, Text } = Typography;
-
-interface QueryResult {
-  columns: Array<{ name: string; dataType: string }>;
-  rows: Array<Record<string, any>>;
-  rowCount: number;
-  executionTimeMs: number;
-  sql: string;
-}
 
 export const Home: React.FC = () => {
   const [selectedDatabase, setSelectedDatabase] = useState<string | null>(null);
@@ -51,6 +47,8 @@ export const Home: React.FC = () => {
   const [activeTab, setActiveTab] = useState<"manual" | "natural">("manual");
   const [generatingSql, setGeneratingSql] = useState(false);
   const [nlError, setNlError] = useState<string | null>(null);
+  const [showFormatModal, setShowFormatModal] = useState(false);
+  const [showExportHint, setShowExportHint] = useState(false);
 
   useEffect(() => {
     if (selectedDatabase) {
@@ -114,60 +112,15 @@ export const Home: React.FC = () => {
     }
   };
 
-  const handleGenerateSQL = async (prompt: string) => {
-    if (!selectedDatabase) return;
-
-    setGeneratingSql(true);
-    setNlError(null);
-    try {
-      const response = await apiClient.post<{ sql: string; explanation: string }>(
-        `/api/v1/dbs/${selectedDatabase}/query/natural`,
-        { prompt }
-      );
-      setSql(response.data.sql);
-      setActiveTab("manual"); // Switch to manual tab to show generated SQL
-      message.success("SQL generated successfully! You can now edit and execute it.");
-    } catch (error: any) {
-      const errorMsg = error.response?.data?.detail || "Failed to generate SQL";
-      setNlError(errorMsg);
-      message.error(errorMsg);
-    } finally {
-      setGeneratingSql(false);
-    }
-  };
-
-  const handleExportCSV = () => {
-    if (!queryResult || queryResult.rows.length === 0) {
-      message.warning("No data to export");
-      return;
-    }
-
-    // Warn if result is large
-    if (queryResult.rows.length > 10000) {
-      Modal.confirm({
-        title: "Large Dataset Warning",
-        icon: <ExclamationCircleOutlined />,
-        content: `You are about to export ${queryResult.rowCount.toLocaleString()} rows. This may take a while and consume memory. Continue?`,
-        onOk: () => exportToCSV(),
-      });
-    } else {
-      exportToCSV();
-    }
-  };
-
-  const exportToCSV = () => {
-    if (!queryResult) return;
-
-    // Generate CSV content
-    const headers = queryResult.columns.map((col) => col.name);
+  // Export helper functions
+  const doExportCSV = useCallback((result: QueryResult) => {
+    const headers = result.columns.map((col) => col.name);
     const csvRows = [headers.join(",")];
 
-    queryResult.rows.forEach((row) => {
+    result.rows.forEach((row) => {
       const values = headers.map((header) => {
         const value = row[header];
-        // Handle null/undefined
         if (value === null || value === undefined) return "";
-        // Escape quotes and wrap in quotes if contains comma or quote
         const stringValue = String(value);
         if (stringValue.includes(",") || stringValue.includes('"') || stringValue.includes("\n")) {
           return `"${stringValue.replace(/"/g, '""')}"`;
@@ -185,7 +138,184 @@ export const Home: React.FC = () => {
     link.download = `${selectedDatabase}_${timestamp}.csv`;
     link.click();
     URL.revokeObjectURL(link.href);
-    message.success(`Exported ${queryResult.rowCount} rows to CSV`);
+  }, [selectedDatabase]);
+
+  const doExportJSON = useCallback((result: QueryResult) => {
+    const jsonContent = JSON.stringify(result.rows, null, 2);
+    const blob = new Blob([jsonContent], { type: "application/json;charset=utf-8;" });
+    const link = document.createElement("a");
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -5);
+    link.href = URL.createObjectURL(blob);
+    link.download = `${selectedDatabase}_${timestamp}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  }, [selectedDatabase]);
+
+  const doExport = useCallback((format: "csv" | "json", result: QueryResult) => {
+    if (format === "csv") {
+      doExportCSV(result);
+    } else {
+      doExportJSON(result);
+    }
+    message.success(`Exported ${result.rowCount} rows to ${format.toUpperCase()}`);
+  }, [doExportCSV, doExportJSON]);
+
+  // Execute and Export for Manual SQL mode
+  const handleExecuteAndExport = useCallback(async (format?: "csv" | "json") => {
+    if (!selectedDatabase || !sql.trim()) {
+      message.warning("Please enter a SQL query");
+      return;
+    }
+
+    // If no format specified, show format selection modal
+    if (!format) {
+      setShowFormatModal(true);
+      return;
+    }
+
+    setExecuting(true);
+    setShowExportHint(false);
+    try {
+      const response = await apiClient.post<QueryResult>(
+        `/api/v1/dbs/${selectedDatabase}/query`,
+        { sql: sql.trim() }
+      );
+      setQueryResult(response.data);
+
+      if (response.data.rows.length === 0) {
+        message.info("Query executed successfully but returned no data");
+        return;
+      }
+
+      // Large dataset warning
+      if (response.data.rows.length > 10000) {
+        Modal.confirm({
+          title: "Large Dataset Warning",
+          icon: <ExclamationCircleOutlined />,
+          content: `Exporting ${response.data.rowCount.toLocaleString()} rows may take a while. Continue?`,
+          onOk: () => doExport(format, response.data),
+        });
+      } else {
+        doExport(format, response.data);
+      }
+    } catch (error: any) {
+      message.error(error.response?.data?.detail || "Query execution failed");
+    } finally {
+      setExecuting(false);
+    }
+  }, [selectedDatabase, sql, doExport]);
+
+  // Smart Query with AI intent recognition
+  const handleSmartQuery = async (prompt: string) => {
+    if (!selectedDatabase) return;
+
+    setGeneratingSql(true);
+    setNlError(null);
+    setShowExportHint(false);
+
+    try {
+      // Call backend AI service with intent recognition
+      const response = await apiClient.post<NaturalQueryResponse>(
+        `/api/v1/dbs/${selectedDatabase}/query/natural`,
+        { prompt }
+      );
+
+      const { sql: generatedSql, intent } = response.data;
+      setSql(generatedSql);
+
+      // Execute based on AI intent
+      if (intent.execute) {
+        // Auto-execute query
+        const queryResponse = await apiClient.post<QueryResult>(
+          `/api/v1/dbs/${selectedDatabase}/query`,
+          { sql: generatedSql }
+        );
+        setQueryResult(queryResponse.data);
+        setActiveTab("manual");
+
+        if (intent.export && queryResponse.data.rows.length > 0) {
+          // Auto-export
+          const format = intent.exportFormat || "csv";
+
+          // Large dataset warning
+          if (queryResponse.data.rows.length > 10000) {
+            Modal.confirm({
+              title: "Large Dataset Warning",
+              icon: <ExclamationCircleOutlined />,
+              content: `Exporting ${queryResponse.data.rowCount.toLocaleString()} rows. Continue?`,
+              onOk: () => doExport(format, queryResponse.data),
+            });
+          } else {
+            doExport(format, queryResponse.data);
+          }
+
+          message.success(
+            `Found ${queryResponse.data.rowCount} rows and exported to ${format.toUpperCase()}`
+          );
+        } else if (queryResponse.data.rows.length > 0) {
+          // Executed but no export intent - show export hint
+          setShowExportHint(true);
+          message.success(
+            `Query executed: ${queryResponse.data.rowCount} rows in ${queryResponse.data.executionTimeMs}ms`
+          );
+        } else {
+          message.info("Query executed but returned no data");
+        }
+      } else {
+        // Only generate SQL, don't execute
+        setActiveTab("manual");
+        message.success("SQL generated! You can review, edit and execute it.");
+      }
+    } catch (error: any) {
+      const errorMsg = error.response?.data?.detail || "Failed to process query";
+      setNlError(errorMsg);
+      message.error(errorMsg);
+    } finally {
+      setGeneratingSql(false);
+    }
+  };
+
+  // Keyboard shortcuts for Manual SQL mode
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Only active in Manual SQL tab
+      if (activeTab !== "manual") return;
+
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey) {
+        if (e.key === "e" || e.key === "E") {
+          e.preventDefault();
+          handleExecuteAndExport();
+        } else if (e.key === "c" || e.key === "C") {
+          e.preventDefault();
+          handleExecuteAndExport("csv");
+        } else if (e.key === "j" || e.key === "J") {
+          e.preventDefault();
+          handleExecuteAndExport("json");
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeTab, handleExecuteAndExport]);
+
+  // Legacy export handlers (for result card buttons)
+  const handleExportCSV = () => {
+    if (!queryResult || queryResult.rows.length === 0) {
+      message.warning("No data to export");
+      return;
+    }
+
+    if (queryResult.rows.length > 10000) {
+      Modal.confirm({
+        title: "Large Dataset Warning",
+        icon: <ExclamationCircleOutlined />,
+        content: `You are about to export ${queryResult.rowCount.toLocaleString()} rows. Continue?`,
+        onOk: () => doExport("csv", queryResult),
+      });
+    } else {
+      doExport("csv", queryResult);
+    }
   };
 
   const handleExportJSON = () => {
@@ -194,31 +324,16 @@ export const Home: React.FC = () => {
       return;
     }
 
-    // Warn if result is large
     if (queryResult.rows.length > 10000) {
       Modal.confirm({
         title: "Large Dataset Warning",
         icon: <ExclamationCircleOutlined />,
-        content: `You are about to export ${queryResult.rowCount.toLocaleString()} rows. This may take a while and consume memory. Continue?`,
-        onOk: () => exportToJSON(),
+        content: `You are about to export ${queryResult.rowCount.toLocaleString()} rows. Continue?`,
+        onOk: () => doExport("json", queryResult),
       });
     } else {
-      exportToJSON();
+      doExport("json", queryResult);
     }
-  };
-
-  const exportToJSON = () => {
-    if (!queryResult) return;
-
-    const jsonContent = JSON.stringify(queryResult.rows, null, 2);
-    const blob = new Blob([jsonContent], { type: "application/json;charset=utf-8;" });
-    const link = document.createElement("a");
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -5);
-    link.href = URL.createObjectURL(blob);
-    link.download = `${selectedDatabase}_${timestamp}.json`;
-    link.click();
-    URL.revokeObjectURL(link.href);
-    message.success(`Exported ${queryResult.rowCount} rows to JSON`);
   };
 
   const tableColumns =
@@ -525,21 +640,48 @@ export const Home: React.FC = () => {
           }
           extra={
             activeTab === "manual" ? (
-              <Button
-                type="primary"
-                icon={<PlayCircleOutlined />}
-                onClick={handleExecuteQuery}
-                loading={executing}
-                size="large"
-                style={{
-                  height: 40,
-                  paddingLeft: 20,
-                  paddingRight: 20,
-                  fontWeight: 700,
-                }}
-              >
-                EXECUTE
-              </Button>
+              <Space.Compact>
+                <Button
+                  type="primary"
+                  icon={<PlayCircleOutlined />}
+                  onClick={handleExecuteQuery}
+                  loading={executing}
+                  size="large"
+                  style={{
+                    height: 40,
+                    paddingLeft: 20,
+                    paddingRight: 20,
+                    fontWeight: 700,
+                  }}
+                >
+                  EXECUTE
+                </Button>
+                <Dropdown
+                  menu={{
+                    items: [
+                      {
+                        key: "csv",
+                        label: "Execute & Export CSV",
+                        icon: <DownloadOutlined />,
+                      },
+                      {
+                        key: "json",
+                        label: "Execute & Export JSON",
+                        icon: <DownloadOutlined />,
+                      },
+                    ],
+                    onClick: ({ key }) => handleExecuteAndExport(key as "csv" | "json"),
+                  }}
+                  disabled={executing}
+                >
+                  <Button
+                    type="primary"
+                    icon={<DownloadOutlined />}
+                    size="large"
+                    style={{ height: 40 }}
+                  />
+                </Dropdown>
+              </Space.Compact>
             ) : null
           }
           style={{ borderWidth: 2, borderColor: "#000000", marginBottom: 16 }}
@@ -587,7 +729,7 @@ export const Home: React.FC = () => {
                 children: (
                   <div style={{ padding: "12px 0" }}>
                     <NaturalLanguageInput
-                      onGenerateSQL={handleGenerateSQL}
+                      onSmartQuery={handleSmartQuery}
                       loading={generatingSql}
                       error={nlError}
                     />
@@ -600,6 +742,74 @@ export const Home: React.FC = () => {
             }}
           />
         </Card>
+
+        {/* Export Format Selection Modal */}
+        <Modal
+          title="Select Export Format"
+          open={showFormatModal}
+          onCancel={() => setShowFormatModal(false)}
+          footer={null}
+          centered
+          width={300}
+        >
+          <Space direction="vertical" style={{ width: "100%" }} size="middle">
+            <Button
+              block
+              size="large"
+              icon={<DownloadOutlined />}
+              onClick={() => {
+                setShowFormatModal(false);
+                handleExecuteAndExport("csv");
+              }}
+            >
+              Export as CSV
+            </Button>
+            <Button
+              block
+              size="large"
+              icon={<DownloadOutlined />}
+              onClick={() => {
+                setShowFormatModal(false);
+                handleExecuteAndExport("json");
+              }}
+            >
+              Export as JSON
+            </Button>
+          </Space>
+        </Modal>
+
+        {/* Export Hint after query execution */}
+        {showExportHint && queryResult && queryResult.rows.length > 0 && (
+          <Alert
+            message={
+              <Space>
+                <span>Query completed: {queryResult.rowCount} rows</span>
+                <Button
+                  size="small"
+                  onClick={() => {
+                    handleExportCSV();
+                    setShowExportHint(false);
+                  }}
+                >
+                  Export CSV
+                </Button>
+                <Button
+                  size="small"
+                  onClick={() => {
+                    handleExportJSON();
+                    setShowExportHint(false);
+                  }}
+                >
+                  Export JSON
+                </Button>
+              </Space>
+            }
+            type="success"
+            closable
+            onClose={() => setShowExportHint(false)}
+            style={{ marginBottom: 16 }}
+          />
+        )}
 
         {/* Query Results */}
         {queryResult && (
