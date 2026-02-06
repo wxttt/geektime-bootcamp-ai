@@ -28,3 +28,4 @@ test.db
 
 .vscode
 .vite
+.mcp.json

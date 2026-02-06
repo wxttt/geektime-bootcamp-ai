@@ -30,16 +30,21 @@ class SQLValidator:
         exp.Select, exp.Union, exp.Intersect, exp.Except
     }
 
+    # Write statement types (allowed when allow_write_operations is True)
+    WRITE_STATEMENT_TYPES: ClassVar = {
+        exp.Insert,
+        exp.Update,
+        exp.Delete,
+        exp.Merge,
+    }
+
     # Allowed top-level expressions (including CTEs)
     ALLOWED_TOP_LEVEL: ClassVar = {
         exp.Select, exp.Union, exp.Intersect, exp.Except, exp.With, exp.Subquery
     }
 
-    # Forbidden statement types
+    # Forbidden statement types (always blocked, even with allow_write_operations)
     FORBIDDEN_STATEMENT_TYPES: ClassVar = {
-        exp.Insert,
-        exp.Update,
-        exp.Delete,
         exp.Drop,
         exp.Create,
         exp.Alter,
@@ -48,7 +53,6 @@ class SQLValidator:
         exp.Set,
         exp.Command,
         exp.Use,
-        exp.Merge,
     }
 
     # Built-in dangerous PostgreSQL functions
@@ -93,6 +97,8 @@ class SQLValidator:
         self.blocked_tables = {t.lower() for t in (blocked_tables or [])}
         self.blocked_columns = {c.lower() for c in (blocked_columns or [])}
         self.allow_explain = allow_explain
+        # Use allow_write_operations from config
+        self.allow_write_operations = config.allow_write_operations
 
         # Combine built-in dangerous functions with custom blocked functions
         self.blocked_functions = self.BUILTIN_DANGEROUS_FUNCTIONS | {
@@ -202,11 +208,20 @@ class SQLValidator:
         Returns:
             Error message if check fails, None otherwise.
         """
-        # Check for forbidden statement types
+        # Check for forbidden statement types (always blocked)
         for forbidden_type in self.FORBIDDEN_STATEMENT_TYPES:
             if isinstance(statement, forbidden_type):
                 stmt_name = forbidden_type.__name__.upper()
-                return f"{stmt_name} statements are not allowed. Only SELECT queries are permitted."
+                return f"{stmt_name} statements are not allowed."
+
+        # Check for write statement types
+        for write_type in self.WRITE_STATEMENT_TYPES:
+            if isinstance(statement, write_type):
+                if not self.allow_write_operations:
+                    stmt_name = write_type.__name__.upper()
+                    return f"{stmt_name} statements are not allowed. Write operations are disabled."
+                # Write operation allowed, no error
+                return None
 
         # Ensure statement is an allowed type (SELECT or set operations)
         if not isinstance(statement, tuple(self.ALLOWED_STATEMENT_TYPES)):

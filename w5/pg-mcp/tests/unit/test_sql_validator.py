@@ -260,7 +260,7 @@ class TestDangerousFunctions:
 
     def test_custom_blocked_function(self) -> None:
         """Test custom blocked function from config."""
-        config = SecurityConfig(blocked_functions=["my_custom_func", "another_func"])
+        config = SecurityConfig(blocked_functions="my_custom_func,another_func")
         validator = SQLValidator(config=config)
 
         sql = "SELECT my_custom_func(123)"

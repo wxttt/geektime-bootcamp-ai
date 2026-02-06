@@ -13,13 +13,14 @@ from asyncpg import Pool
 from mcp.server.fastmcp import FastMCP
 
 from pg_mcp.cache.schema_cache import SchemaCache
-from pg_mcp.config.settings import Settings
+from pg_mcp.config.settings import MultiDatabaseConfig, Settings
 from pg_mcp.db.pool import close_pools, create_pool
 from pg_mcp.models.query import QueryRequest, QueryResponse, ReturnType
 from pg_mcp.observability.logging import configure_logging, get_logger
 from pg_mcp.observability.metrics import MetricsCollector
 from pg_mcp.resilience.circuit_breaker import CircuitBreaker
 from pg_mcp.resilience.rate_limiter import MultiRateLimiter
+from pg_mcp.services.database_selector import DatabaseSelector
 from pg_mcp.services.orchestrator import QueryOrchestrator
 from pg_mcp.services.result_validator import ResultValidator
 from pg_mcp.services.sql_executor import SQLExecutor
@@ -94,21 +95,53 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:  # type: ignore[type-a
             },
         )
 
-        # 3. Create database connection pools
+        # 3. Load multi-database configuration
+        multi_db_config = MultiDatabaseConfig()
+
+        # 4. Create database connection pools
         logger.info("Creating database connection pools...")
         _pools = {}
-        # Note: For single database configuration, we use the main database config
-        pool = await create_pool(_settings.database)
-        _pools[_settings.database.name] = pool
-        logger.info(
-            f"Created connection pool for database '{_settings.database.name}'",
-            extra={
-                "min_size": _settings.database.min_pool_size,
-                "max_size": _settings.database.max_pool_size,
-            },
-        )
 
-        # 4. Load Schema cache
+        if multi_db_config.databases:
+            # Multi-database mode: create pools from PG_DATABASES
+            logger.info(
+                f"Multi-database mode: {len(multi_db_config.databases)} databases configured"
+            )
+            for db_name, db_config in multi_db_config.databases.items():
+                # Create a DatabaseConfig-like object for create_pool
+                from pg_mcp.config.settings import DatabaseConfig
+
+                single_db_config = DatabaseConfig(
+                    host=db_config.host,
+                    port=db_config.port,
+                    name=db_config.name or db_name,
+                    user=db_config.user,
+                    password=db_config.password,
+                    min_pool_size=db_config.min_pool_size,
+                    max_pool_size=db_config.max_pool_size,
+                )
+                pool = await create_pool(single_db_config)
+                _pools[db_name] = pool
+                logger.info(
+                    f"Created connection pool for database '{db_name}'",
+                    extra={
+                        "host": db_config.host,
+                        "description": db_config.description[:50] if db_config.description else "",
+                    },
+                )
+        else:
+            # Single database mode (backward compatible): use DATABASE_* env vars
+            pool = await create_pool(_settings.database)
+            _pools[_settings.database.name] = pool
+            logger.info(
+                f"Created connection pool for database '{_settings.database.name}'",
+                extra={
+                    "min_size": _settings.database.min_pool_size,
+                    "max_size": _settings.database.max_pool_size,
+                },
+            )
+
+        # 5. Load Schema cache
         logger.info("Initializing schema cache...")
         _schema_cache = SchemaCache(_settings.cache)
 
@@ -154,7 +187,7 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:  # type: ignore[type-a
             config=_settings.security,
             blocked_tables=None,  # Can be configured via settings if needed
             blocked_columns=None,  # Can be configured via settings if needed
-            allow_explain=False,
+            allow_explain=_settings.security.allow_explain,
         )
 
         # SQL Executor (create one per database)
@@ -183,23 +216,62 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:  # type: ignore[type-a
             recovery_timeout=_settings.resilience.circuit_breaker_timeout,
         )
 
-        # Rate Limiter
-        _rate_limiter = MultiRateLimiter(
-            query_limit=10,  # Can be made configurable
-            llm_limit=5,  # Can be made configurable
-        )
+        # Rate Limiter (using configuration values)
+        if _settings.resilience.rate_limit_enabled:
+            _rate_limiter = MultiRateLimiter(
+                query_limit=_settings.resilience.rate_limit_max_concurrent_queries,
+                llm_limit=_settings.resilience.rate_limit_max_concurrent_llm,
+            )
+            logger.info(
+                "Rate limiter initialized",
+                extra={
+                    "query_limit": _settings.resilience.rate_limit_max_concurrent_queries,
+                    "llm_limit": _settings.resilience.rate_limit_max_concurrent_llm,
+                },
+            )
+        else:
+            _rate_limiter = None
+            logger.info("Rate limiting disabled by configuration")
 
-        # 8. Create QueryOrchestrator
+        # 8. Create database selector for intelligent routing (if multiple databases)
+        database_selector = None
+        database_descriptions = {}
+
+        if len(_pools) > 1 and multi_db_config.auto_select_enabled:
+            database_selector = DatabaseSelector(_settings.openai)
+            database_descriptions = multi_db_config.database_descriptions
+            logger.info(
+                "Database selector initialized for intelligent routing",
+                extra={
+                    "databases_with_descriptions": list(database_descriptions.keys()),
+                },
+            )
+
+        # Determine default database
+        default_database = multi_db_config.default_database
+        if not default_database:
+            # Fall back to single database config name or first available
+            if multi_db_config.databases:
+                default_database = next(iter(multi_db_config.databases.keys()))
+            else:
+                default_database = _settings.database.name
+
+        # 9. Create QueryOrchestrator
         logger.info("Creating query orchestrator...")
         _orchestrator = QueryOrchestrator(
             sql_generator=sql_generator,
             sql_validator=sql_validator,
-            sql_executor=sql_executors[_settings.database.name],  # Use primary executor
+            sql_executors=sql_executors,  # Pass all executors for multi-database support
             result_validator=result_validator,
             schema_cache=_schema_cache,
             pools=_pools,
             resilience_config=_settings.resilience,
             validation_config=_settings.validation,
+            default_database=default_database,
+            rate_limiter=_rate_limiter,  # Pass rate limiter for concurrency control
+            metrics=_metrics,  # Pass metrics collector for observability
+            database_selector=database_selector,  # Pass database selector for intelligent routing
+            database_descriptions=database_descriptions,  # Pass descriptions for selection
         )
 
         logger.info("PostgreSQL MCP Server initialization complete!")
@@ -312,7 +384,7 @@ async def query(
         - Row count limits prevent memory exhaustion
         - All queries run in read-only transactions
     """
-    global _orchestrator
+    global _orchestrator, _metrics, _settings
 
     if _orchestrator is None:
         return {
@@ -322,10 +394,16 @@ async def query(
                 "message": "Server not initialized properly",
                 "details": None,
             },
+            "tokens_used": 0,
         }
+
+    # Resolve database name for metrics
+    db_name = database or (_settings.database.name if _settings else "unknown")
 
     # Validate return_type
     if return_type not in ("sql", "result"):
+        if _metrics:
+            _metrics.increment_query_request("validation_failed", db_name)
         return {
             "success": False,
             "error": {
@@ -333,6 +411,7 @@ async def query(
                 "message": f"Invalid return_type: '{return_type}'. Must be 'sql' or 'result'.",
                 "details": {"return_type": return_type},
             },
+            "tokens_used": 0,
         }
 
     # Build request
@@ -343,6 +422,8 @@ async def query(
             return_type=ReturnType(return_type),
         )
     except Exception as e:
+        if _metrics:
+            _metrics.increment_query_request("validation_failed", db_name)
         return {
             "success": False,
             "error": {
@@ -350,6 +431,7 @@ async def query(
                 "message": f"Invalid request parameters: {e!s}",
                 "details": {"error": str(e)},
             },
+            "tokens_used": 0,
         }
 
     # Execute query through orchestrator
@@ -362,6 +444,8 @@ async def query(
         return result
     except Exception as e:
         logger.exception("Unexpected error in query tool")
+        if _metrics:
+            _metrics.increment_query_request("error", db_name)
         return {
             "success": False,
             "error": {
